@@ -1,0 +1,295 @@
+---
+title: "Étapes clusters analysis (future)"
+author: "Me"
+format: html
+editor: visual
+---
+
+## Goal
+
+1.  See if we can get satisfactory grouping
+2.  Select the most interesting cluster and explore the observations
+3.  Keep the model for prediction of further data collection
+4.  Descriptive analysis of the cluster to detect other patterns
+    1.  Assess the usefulness of
+        1.  Tags/labels
+        2.  Rank
+        3.  Demo and others
+    2.  Find a way to use information from the observations to link to new data collection strategy
+5.  Think of other in depth analysis for a mixed model prediction
+    1.  Other level of observation based on the clusters/observation for instance
+
+## Libraries and loading the data
+
+```{r}
+pacman::p_load(tidyverse, rvest, tidySEM, tictoc, FactoMineR, factoextra, corrplot, lsa)
+
+# Options ----
+theme_set(theme_bw())
+
+# Data ----
+df <- read_rds("data/df.rds")
+```
+
+## Preparing the data for the PCA
+
+-   Data cleaning
+
+-   Keep numerical variable
+
+-   No need for id variable (just keep a copy of the original data with all the variables)
+
+```{r}
+# Keep only continuous variables
+df_pca <- 
+  df %>% 
+  select(hp:res)
+```
+
+## Performing the PCA
+
+Do the dims sum up to 70% at least withour going beyond 5?
+
+-   Yes: Keep going
+
+-   No: Need data selection? data transformation? more data? CA? Keep going?
+
+Do I see a pattern/cluster in the ind plot?
+
+-   Yes: Good promising
+
+-   No: Let's dive in anyway
+
+```{r}
+res_pca <- PCA(df_pca, 
+           ncp = 5 # number of dim to retain: default to 5
+           )
+```
+
+## PCA diagnostic
+
+### How many dimensions?
+
+-   How many dim to retain (preferably max 5)?
+
+    -   If removing is necessary, go to `PCA()` and change the ncp argument
+
+```{r}
+# Eigenvalue
+fviz_screeplot(res_pca, addlabels = TRUE)
+```
+
+### Variables importance (contribution)
+
+-   Observe wich variables (tags/labels) should be considered in the future (can be useful for modelling, mixed model) by removing poorly informative variable or using bayesian inference
+
+```{r}
+fviz_contrib(res_pca, choice = "var", 
+             axes = 1:3 # Chose how many dimensino to considerate
+             )
+```
+
+## PCA dimensions names
+
+-   Give sensical names
+
+-   Remove unecessary dimension (if filled by NAs for instance)
+
+    -   If so, go to `PCA()` and change the ncp argument
+
+```{r}
+# Correlation plot
+res_pca$var$cor %>% 
+  corrplot()
+
+# Top 5 positive/negative correlated variables by dim
+apply(res_pca$var$cor, 
+      MARGIN = 2, 
+      FUN = function(x) sort(x[x >=0.7 | x <= -0.7], decreasing = T)[1:5], 
+      simplify = FALSE)
+```
+
+## Performing HCPC
+
+-   Check if the clustering make visual sens (not to much overlap)
+
+-   Test with higher or smaller values to see if it make more visual sens (less overlap)
+
+```{r}
+res_hcpc <- HCPC(res_pca,
+                 nb.clust = -1, # Automatic number of cluster
+                 nb.par = 5, # Top 5 most representative per cluster (see bellow)
+                 order = TRUE, # Order cluster based on the first dim
+                 graph = FALSE # No graph from here
+                 )
+
+# Visualization
+fviz_cluster(res_hcpc) +
+  theme_bw()
+```
+
+## HCPC diagnostic
+
+### Description of the clusters by the variables
+
+-   Keep variables with low p-values (\< 0.05)
+
+-   Note: v.test alow a quick glimpse
+
+    -   \>0: cluster mean higher than overall mean
+
+    -   \<0: cluster mean lower than overall mean
+
+-   Try to give a name to each category or at least keep in mind their peculiarity
+
+    -   If to complicated, look with dimension bellow
+
+```{r}
+# Description of the clusters by the variables
+res_hcpc$desc.var
+```
+
+### Description of the cluster by the dimension
+
+-   Same as before, see if it makes more sens here
+
+-   If there is still some difficulties naming the cluster, look at the individuals bellow
+
+```{r}
+# Description of the cluster by the dimension
+res_hcpc$desc.axes
+
+```
+
+### Description of the clusters by the individuals
+
+-   Get information about these individuals and why they are relevant (especialy those from Paragon)
+
+    -   See next part for that
+
+-   Can help naming the category
+
+-   Check if we already have important individuals, it can help targeting the right clusters
+
+```{r}
+# Description of the cluster by the individuals
+  # Paragon: Most representative individuals of the cluster (closer to the center)
+  # Dist: Less representative individuals of the cluster (farther to the center)
+  # NOTE: the lower value = closer, bigger value = further
+res_hcpc$desc.ind
+
+```
+
+### Get representative individuals for each cluster
+
+-   Same as before
+
+```{r}
+# HCPC dataframe with the clusters for each ind
+df_hcpc <- 
+  res_hcpc$data.clust %>% 
+  select(clust) %>% 
+  bind_cols(df)
+
+# Get representative individual for each cluster
+list_rep <- 
+  map(res_hcpc$desc.ind$para, names) %>% 
+  flatten_chr()
+
+# Filter the representative members
+df_hcpc %>% 
+  filter(row_number() %in% list_rep) %>% 
+  arrange(clust)
+
+```
+
+## HCPC targeting cluster
+
+-   Find which cluster(s) contains the most important individuals to have a first glimpse of the most important clusters
+
+-   Do back and forth between the cluster graph and this result to have an idea how close are this VIPs to each other (more detailed analysis bellow)
+
+```{r}
+list_vip <- c(1, 54, 62, 100, 147)
+
+df_hcpc %>% 
+  filter(row_number() %in% list_vip) %>% 
+  arrange(clust)
+
+```
+
+## Distance between les VIPs
+
+### Most similar profiles
+
+-   Can give further indication if the clusters are good (and by definition the data)
+
+    -   If the data is not good: Transformation?
+
+-   Can give information if the cluster should have more/less group
+
+```{r}
+# Ind coord
+ind_coord <- res_pca$ind$coord
+
+# Sim matrix
+matrix_sim <- 
+  ind_coord %>% 
+  t() %>% 
+  cosine()
+
+# Similarity among the VIPs
+  # NOTE: Similarity is really close to correlation and range from -1 to 1
+matrix_sim[list_vip, list_vip] %>% 
+  corrplot::corrplot(order = "hclust", # To create clusters
+                     addrect = 3 # Number of clusters
+                     )
+
+```
+
+### Further profiling (if needed)
+
+-   Investigate the 4 or 9 closest profile to the VIPs
+
+-   If the clusters still do not make sens, create new cluster based on the VIP closest ind
+
+    -   It can be the beginning of further mixed model analysis by comparing these new clusters
+
+```{r}
+# The 10 closest inds of ind 7
+matrix_sim %>% 
+  .[7,] %>% 
+  sort(decreasing = T) %>% 
+  .[2:11]
+
+# Proximity between 7 and 77
+cosine(ind_coord[7,], ind_coord[77,])
+
+# Proximity between 7 and 10, 100 and 1000
+matrix_sim %>% 
+  .[7,] %>% 
+  .[c(10, 100, 1000)]
+```
+
+### Most influencial individuals
+
+```{r}
+res_pca$ind$contrib %>% 
+  rowSums() %>% 
+  sort(decreasing = T) %>% 
+  .[1:10]
+```
+
+```{r}
+library(plotly)
+p1 <- 
+  df_hcpc %>%
+  mutate(clust = factor(clust)) %>% 
+  summarise(total = mean(total),
+            .by = clust) %>% 
+  ggplot(aes(clust, total)) +
+  geom_col(fill = "cyan", alpha = 0.4, color = "black")+
+  geom_label(aes(label = round(total, 1)))
+
+plotly::ggplotly(p1)
+```
